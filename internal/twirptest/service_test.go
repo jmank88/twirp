@@ -692,12 +692,14 @@ func TestMuxingTwirpServerDefaultRequestContext(t *testing.T) {
 	}
 }
 
+var nilServerHooks *twirp.ServerHooks
+
 // WriteError should allow middleware to easily respond with a properly formatted error response
 func TestWriteErrorFromHTTPMiddleware(t *testing.T) {
 	// Make a fake server that returns a Twirp error from the HTTP stack, without using an actual Twirp implementation.
 	mux := http.NewServeMux()
 	mux.HandleFunc(HaberdasherPathPrefix+"MakeHat", func(w http.ResponseWriter, r *http.Request) {
-		WriteError(w, twirp.NewError(twirp.Unauthenticated, "You Shall Not Pass!!!"))
+		nilServerHooks.WriteError(nil, w, twirp.NewError(twirp.Unauthenticated, "You Shall Not Pass!!!"))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()
@@ -725,7 +727,7 @@ func TestWriteErrorFromHTTPMiddlewareInternal(t *testing.T) {
 	// Make a fake server that returns an error from the HTTP stack, without using an actual Twirp implementation.
 	mux := http.NewServeMux()
 	mux.HandleFunc(HaberdasherPathPrefix+"MakeHat", func(w http.ResponseWriter, r *http.Request) {
-		WriteError(w, errors.New("should become a twirp.Internal"))
+		nilServerHooks.WriteError(nil, w, errors.New("should become a twirp.Internal"))
 	})
 	server := httptest.NewServer(mux)
 	defer server.Close()

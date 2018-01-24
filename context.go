@@ -55,6 +55,12 @@ func StatusCode(ctx context.Context) (string, bool) {
 	return code, ok
 }
 
+// HTTPRequestHeaders retrieves the request header.
+func HTTPRequestHeaders(ctx context.Context) (http.Header, bool) {
+	h, ok := ctx.Value(contextkeys.RequestHeaderKey).(http.Header)
+	return h, ok
+}
+
 // WithHTTPRequestHeaders stores an http.Header in a context.Context. When
 // using a Twirp-generated client, you can pass the returned context
 // into any of the request methods, and the stored header will be
@@ -85,11 +91,6 @@ func WithHTTPRequestHeaders(ctx context.Context, h http.Header) (context.Context
 	}
 
 	return context.WithValue(ctx, contextkeys.RequestHeaderKey, copied), nil
-}
-
-func HTTPRequestHeaders(ctx context.Context) (http.Header, bool) {
-	h, ok := ctx.Value(contextkeys.RequestHeaderKey).(http.Header)
-	return h, ok
 }
 
 // SetHTTPResponseHeader sets an HTTP header key-value pair using a context

@@ -7,8 +7,8 @@ import bytes "bytes"
 import context "context"
 import fmt "fmt"
 import ioutil "io/ioutil"
-import log "log"
 import http "net/http"
+import strings "strings"
 
 import jsonpb "github.com/golang/protobuf/jsonpb"
 import proto "github.com/golang/protobuf/proto"
@@ -30,21 +30,21 @@ type Svc2 interface {
 // ====================
 
 type svc2ProtobufClient struct {
-	client HTTPClient
+	client twirp.HTTPClient
 	urls   [2]string
 }
 
 // NewSvc2ProtobufClient creates a Protobuf client that implements the Svc2 interface.
-// It communicates using protobuf messages and can be configured with a custom http.Client.
-func NewSvc2ProtobufClient(addr string, client HTTPClient) Svc2 {
-	prefix := urlBase(addr) + Svc2PathPrefix
+// It communicates using Protobuf and can be configured with a custom twirp.HTTPClient.
+func NewSvc2ProtobufClient(addr string, client twirp.HTTPClient) Svc2 {
+	prefix := twirp.URLBase(addr) + Svc2PathPrefix
 	urls := [2]string{
 		prefix + "Send",
 		prefix + "SamePackageProtoImport",
 	}
 	if httpClient, ok := client.(*http.Client); ok {
 		return &svc2ProtobufClient{
-			client: withoutRedirects(httpClient),
+			client: twirp.WithoutRedirects(httpClient),
 			urls:   urls,
 		}
 	}
@@ -56,13 +56,13 @@ func NewSvc2ProtobufClient(addr string, client HTTPClient) Svc2 {
 
 func (c *svc2ProtobufClient) Send(ctx context.Context, in *Msg2) (*Msg2, error) {
 	out := new(Msg2)
-	err := doProtoRequest(ctx, c.client, c.urls[0], in, out)
+	err := twirp.DoProtobufRequest(ctx, c.client, c.urls[0], in, out)
 	return out, err
 }
 
 func (c *svc2ProtobufClient) SamePackageProtoImport(ctx context.Context, in *Msg1) (*Msg1, error) {
 	out := new(Msg1)
-	err := doProtoRequest(ctx, c.client, c.urls[1], in, out)
+	err := twirp.DoProtobufRequest(ctx, c.client, c.urls[1], in, out)
 	return out, err
 }
 
@@ -71,21 +71,21 @@ func (c *svc2ProtobufClient) SamePackageProtoImport(ctx context.Context, in *Msg
 // ================
 
 type svc2JSONClient struct {
-	client HTTPClient
+	client twirp.HTTPClient
 	urls   [2]string
 }
 
 // NewSvc2JSONClient creates a JSON client that implements the Svc2 interface.
-// It communicates using JSON requests and responses instead of protobuf messages.
-func NewSvc2JSONClient(addr string, client HTTPClient) Svc2 {
-	prefix := urlBase(addr) + Svc2PathPrefix
+// It communicates using JSON and can be configured with a custom twirp.HTTPClient.
+func NewSvc2JSONClient(addr string, client twirp.HTTPClient) Svc2 {
+	prefix := twirp.URLBase(addr) + Svc2PathPrefix
 	urls := [2]string{
 		prefix + "Send",
 		prefix + "SamePackageProtoImport",
 	}
 	if httpClient, ok := client.(*http.Client); ok {
 		return &svc2JSONClient{
-			client: withoutRedirects(httpClient),
+			client: twirp.WithoutRedirects(httpClient),
 			urls:   urls,
 		}
 	}
@@ -97,13 +97,13 @@ func NewSvc2JSONClient(addr string, client HTTPClient) Svc2 {
 
 func (c *svc2JSONClient) Send(ctx context.Context, in *Msg2) (*Msg2, error) {
 	out := new(Msg2)
-	err := doJSONRequest(ctx, c.client, c.urls[0], in, out)
+	err := twirp.DoJSONRequest(ctx, c.client, c.urls[0], in, out)
 	return out, err
 }
 
 func (c *svc2JSONClient) SamePackageProtoImport(ctx context.Context, in *Msg1) (*Msg1, error) {
 	out := new(Msg1)
-	err := doJSONRequest(ctx, c.client, c.urls[1], in, out)
+	err := twirp.DoJSONRequest(ctx, c.client, c.urls[1], in, out)
 	return out, err
 }
 
@@ -113,20 +113,14 @@ func (c *svc2JSONClient) SamePackageProtoImport(ctx context.Context, in *Msg1) (
 
 type svc2Server struct {
 	Svc2
-	hooks *twirp.ServerHooks
+	*twirp.ServerHooks
 }
 
-func NewSvc2Server(svc Svc2, hooks *twirp.ServerHooks) TwirpServer {
+func NewSvc2Server(svc Svc2, hooks *twirp.ServerHooks) twirp.Server {
 	return &svc2Server{
-		Svc2:  svc,
-		hooks: hooks,
+		Svc2:        svc,
+		ServerHooks: hooks,
 	}
-}
-
-// writeError writes an HTTP response with a valid Twirp error format, and triggers hooks.
-// If err is not a twirp.Error, it will get wrapped with twirp.InternalErrorWith(err)
-func (s *svc2Server) writeError(ctx context.Context, resp http.ResponseWriter, err error) {
-	writeError(ctx, resp, err, s.hooks)
 }
 
 // Svc2PathPrefix is used for all URL paths on a twirp Svc2 server.
@@ -141,32 +135,33 @@ func (s *svc2Server) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	ctx = ctxsetters.WithResponseWriter(ctx, resp)
 
 	var err error
-	ctx, err = callRequestReceived(ctx, s.hooks)
+	ctx, err = s.CallRequestReceived(ctx)
 	if err != nil {
-		s.writeError(ctx, resp, err)
+		s.WriteError(ctx, resp, err)
 		return
 	}
 
 	if req.Method != "POST" {
 		msg := fmt.Sprintf("unsupported method %q (only POST is allowed)", req.Method)
-		err = badRouteError(msg, req.Method, req.URL.Path)
-		s.writeError(ctx, resp, err)
+		err = twirp.BadRouteError(msg, req.Method, req.URL.Path)
+		s.WriteError(ctx, resp, err)
 		return
 	}
 
-	switch req.URL.Path {
-	case "/twirp/twirp.internal.twirptest.multiple.Svc2/Send":
-		s.serveSend(ctx, resp, req)
-		return
-	case "/twirp/twirp.internal.twirptest.multiple.Svc2/SamePackageProtoImport":
-		s.serveSamePackageProtoImport(ctx, resp, req)
-		return
-	default:
-		msg := fmt.Sprintf("no handler for path %q", req.URL.Path)
-		err = badRouteError(msg, req.Method, req.URL.Path)
-		s.writeError(ctx, resp, err)
-		return
+	if strings.HasPrefix(req.URL.Path, Svc2PathPrefix) {
+		switch req.URL.Path[len(Svc2PathPrefix):] {
+		case "Send":
+			s.serveSend(ctx, resp, req)
+			return
+		case "SamePackageProtoImport":
+			s.serveSamePackageProtoImport(ctx, resp, req)
+			return
+		}
 	}
+	msg := fmt.Sprintf("no handler for path %q", req.URL.Path)
+	err = twirp.BadRouteError(msg, req.Method, req.URL.Path)
+	s.WriteError(ctx, resp, err)
+	return
 }
 
 func (s *svc2Server) serveSend(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
@@ -177,26 +172,30 @@ func (s *svc2Server) serveSend(ctx context.Context, resp http.ResponseWriter, re
 		s.serveSendProtobuf(ctx, resp, req)
 	default:
 		msg := fmt.Sprintf("unexpected Content-Type: %q", req.Header.Get("Content-Type"))
-		twerr := badRouteError(msg, req.Method, req.URL.Path)
-		s.writeError(ctx, resp, twerr)
+		twerr := twirp.BadRouteError(msg, req.Method, req.URL.Path)
+		s.WriteError(ctx, resp, twerr)
 	}
 }
 
 func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	var err error
 	ctx = ctxsetters.WithMethodName(ctx, "Send")
-	ctx, err = callRequestRouted(ctx, s.hooks)
+	ctx, err = s.CallRequestRouted(ctx)
 	if err != nil {
-		s.writeError(ctx, resp, err)
+		s.WriteError(ctx, resp, err)
 		return
 	}
 
-	defer closebody(req.Body)
+	defer func() {
+		if err := req.Body.Close(); err != nil {
+			s.Printf("error closing body: %q", err)
+		}
+	}()
 	reqContent := new(Msg2)
 	unmarshaler := jsonpb.Unmarshaler{AllowUnknownFields: true}
 	if err = unmarshaler.Unmarshal(req.Body, reqContent); err != nil {
-		err = wrapErr(err, "failed to parse request json")
-		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		err = twirp.WrapErr(err, "failed to parse request json")
+		s.WriteError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
 
@@ -206,7 +205,7 @@ func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter
 		defer func() {
 			// In case of a panic, serve a 500 error and then panic.
 			if r := recover(); r != nil {
-				s.writeError(ctx, resp, twirp.InternalError("Internal service panic"))
+				s.WriteError(ctx, resp, twirp.InternalError("Internal service panic"))
 				panic(r)
 			}
 		}()
@@ -214,21 +213,21 @@ func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter
 	}()
 
 	if err != nil {
-		s.writeError(ctx, resp, err)
+		s.WriteError(ctx, resp, err)
 		return
 	}
 	if respContent == nil {
-		s.writeError(ctx, resp, twirp.InternalError("received a nil *Msg2 and nil error while calling Send. nil responses are not supported"))
+		s.WriteError(ctx, resp, twirp.InternalError("received a nil *Msg2 and nil error while calling Send. nil responses are not supported"))
 		return
 	}
 
-	ctx = callResponsePrepared(ctx, s.hooks)
+	ctx = s.CallResponsePrepared(ctx)
 
 	var buf bytes.Buffer
 	marshaler := &jsonpb.Marshaler{OrigName: true}
 	if err = marshaler.Marshal(&buf, respContent); err != nil {
-		err = wrapErr(err, "failed to marshal json response")
-		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		err = twirp.WrapErr(err, "failed to marshal json response")
+		s.WriteError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
 
@@ -236,31 +235,35 @@ func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(http.StatusOK)
 	if _, err = resp.Write(buf.Bytes()); err != nil {
-		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
+		s.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
-	callResponseSent(ctx, s.hooks)
+	s.CallResponseSent(ctx)
 }
 
 func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	var err error
 	ctx = ctxsetters.WithMethodName(ctx, "Send")
-	ctx, err = callRequestRouted(ctx, s.hooks)
+	ctx, err = s.CallRequestRouted(ctx)
 	if err != nil {
-		s.writeError(ctx, resp, err)
+		s.WriteError(ctx, resp, err)
 		return
 	}
 
-	defer closebody(req.Body)
+	defer func() {
+		if err := req.Body.Close(); err != nil {
+			s.Printf("error closing body: %q", err)
+		}
+	}()
 	buf, err := ioutil.ReadAll(req.Body)
 	if err != nil {
-		err = wrapErr(err, "failed to read request body")
-		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		err = twirp.WrapErr(err, "failed to read request body")
+		s.WriteError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
 	reqContent := new(Msg2)
 	if err = proto.Unmarshal(buf, reqContent); err != nil {
-		err = wrapErr(err, "failed to parse request proto")
-		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		err = twirp.WrapErr(err, "failed to parse request proto")
+		s.WriteError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
 
@@ -270,7 +273,7 @@ func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWr
 		defer func() {
 			// In case of a panic, serve a 500 error and then panic.
 			if r := recover(); r != nil {
-				s.writeError(ctx, resp, twirp.InternalError("Internal service panic"))
+				s.WriteError(ctx, resp, twirp.InternalError("Internal service panic"))
 				panic(r)
 			}
 		}()
@@ -278,20 +281,20 @@ func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWr
 	}()
 
 	if err != nil {
-		s.writeError(ctx, resp, err)
+		s.WriteError(ctx, resp, err)
 		return
 	}
 	if respContent == nil {
-		s.writeError(ctx, resp, twirp.InternalError("received a nil *Msg2 and nil error while calling Send. nil responses are not supported"))
+		s.WriteError(ctx, resp, twirp.InternalError("received a nil *Msg2 and nil error while calling Send. nil responses are not supported"))
 		return
 	}
 
-	ctx = callResponsePrepared(ctx, s.hooks)
+	ctx = s.CallResponsePrepared(ctx)
 
 	respBytes, err := proto.Marshal(respContent)
 	if err != nil {
-		err = wrapErr(err, "failed to marshal proto response")
-		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		err = twirp.WrapErr(err, "failed to marshal proto response")
+		s.WriteError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
 
@@ -299,9 +302,9 @@ func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWr
 	resp.Header().Set("Content-Type", "application/protobuf")
 	resp.WriteHeader(http.StatusOK)
 	if _, err = resp.Write(respBytes); err != nil {
-		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
+		s.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
-	callResponseSent(ctx, s.hooks)
+	s.CallResponseSent(ctx)
 }
 
 func (s *svc2Server) serveSamePackageProtoImport(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
@@ -312,26 +315,30 @@ func (s *svc2Server) serveSamePackageProtoImport(ctx context.Context, resp http.
 		s.serveSamePackageProtoImportProtobuf(ctx, resp, req)
 	default:
 		msg := fmt.Sprintf("unexpected Content-Type: %q", req.Header.Get("Content-Type"))
-		twerr := badRouteError(msg, req.Method, req.URL.Path)
-		s.writeError(ctx, resp, twerr)
+		twerr := twirp.BadRouteError(msg, req.Method, req.URL.Path)
+		s.WriteError(ctx, resp, twerr)
 	}
 }
 
 func (s *svc2Server) serveSamePackageProtoImportJSON(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	var err error
 	ctx = ctxsetters.WithMethodName(ctx, "SamePackageProtoImport")
-	ctx, err = callRequestRouted(ctx, s.hooks)
+	ctx, err = s.CallRequestRouted(ctx)
 	if err != nil {
-		s.writeError(ctx, resp, err)
+		s.WriteError(ctx, resp, err)
 		return
 	}
 
-	defer closebody(req.Body)
+	defer func() {
+		if err := req.Body.Close(); err != nil {
+			s.Printf("error closing body: %q", err)
+		}
+	}()
 	reqContent := new(Msg1)
 	unmarshaler := jsonpb.Unmarshaler{AllowUnknownFields: true}
 	if err = unmarshaler.Unmarshal(req.Body, reqContent); err != nil {
-		err = wrapErr(err, "failed to parse request json")
-		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		err = twirp.WrapErr(err, "failed to parse request json")
+		s.WriteError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
 
@@ -341,7 +348,7 @@ func (s *svc2Server) serveSamePackageProtoImportJSON(ctx context.Context, resp h
 		defer func() {
 			// In case of a panic, serve a 500 error and then panic.
 			if r := recover(); r != nil {
-				s.writeError(ctx, resp, twirp.InternalError("Internal service panic"))
+				s.WriteError(ctx, resp, twirp.InternalError("Internal service panic"))
 				panic(r)
 			}
 		}()
@@ -349,21 +356,21 @@ func (s *svc2Server) serveSamePackageProtoImportJSON(ctx context.Context, resp h
 	}()
 
 	if err != nil {
-		s.writeError(ctx, resp, err)
+		s.WriteError(ctx, resp, err)
 		return
 	}
 	if respContent == nil {
-		s.writeError(ctx, resp, twirp.InternalError("received a nil *Msg1 and nil error while calling SamePackageProtoImport. nil responses are not supported"))
+		s.WriteError(ctx, resp, twirp.InternalError("received a nil *Msg1 and nil error while calling SamePackageProtoImport. nil responses are not supported"))
 		return
 	}
 
-	ctx = callResponsePrepared(ctx, s.hooks)
+	ctx = s.CallResponsePrepared(ctx)
 
 	var buf bytes.Buffer
 	marshaler := &jsonpb.Marshaler{OrigName: true}
 	if err = marshaler.Marshal(&buf, respContent); err != nil {
-		err = wrapErr(err, "failed to marshal json response")
-		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		err = twirp.WrapErr(err, "failed to marshal json response")
+		s.WriteError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
 
@@ -371,31 +378,35 @@ func (s *svc2Server) serveSamePackageProtoImportJSON(ctx context.Context, resp h
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(http.StatusOK)
 	if _, err = resp.Write(buf.Bytes()); err != nil {
-		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
+		s.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
-	callResponseSent(ctx, s.hooks)
+	s.CallResponseSent(ctx)
 }
 
 func (s *svc2Server) serveSamePackageProtoImportProtobuf(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	var err error
 	ctx = ctxsetters.WithMethodName(ctx, "SamePackageProtoImport")
-	ctx, err = callRequestRouted(ctx, s.hooks)
+	ctx, err = s.CallRequestRouted(ctx)
 	if err != nil {
-		s.writeError(ctx, resp, err)
+		s.WriteError(ctx, resp, err)
 		return
 	}
 
-	defer closebody(req.Body)
+	defer func() {
+		if err := req.Body.Close(); err != nil {
+			s.Printf("error closing body: %q", err)
+		}
+	}()
 	buf, err := ioutil.ReadAll(req.Body)
 	if err != nil {
-		err = wrapErr(err, "failed to read request body")
-		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		err = twirp.WrapErr(err, "failed to read request body")
+		s.WriteError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
 	reqContent := new(Msg1)
 	if err = proto.Unmarshal(buf, reqContent); err != nil {
-		err = wrapErr(err, "failed to parse request proto")
-		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		err = twirp.WrapErr(err, "failed to parse request proto")
+		s.WriteError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
 
@@ -405,7 +416,7 @@ func (s *svc2Server) serveSamePackageProtoImportProtobuf(ctx context.Context, re
 		defer func() {
 			// In case of a panic, serve a 500 error and then panic.
 			if r := recover(); r != nil {
-				s.writeError(ctx, resp, twirp.InternalError("Internal service panic"))
+				s.WriteError(ctx, resp, twirp.InternalError("Internal service panic"))
 				panic(r)
 			}
 		}()
@@ -413,20 +424,20 @@ func (s *svc2Server) serveSamePackageProtoImportProtobuf(ctx context.Context, re
 	}()
 
 	if err != nil {
-		s.writeError(ctx, resp, err)
+		s.WriteError(ctx, resp, err)
 		return
 	}
 	if respContent == nil {
-		s.writeError(ctx, resp, twirp.InternalError("received a nil *Msg1 and nil error while calling SamePackageProtoImport. nil responses are not supported"))
+		s.WriteError(ctx, resp, twirp.InternalError("received a nil *Msg1 and nil error while calling SamePackageProtoImport. nil responses are not supported"))
 		return
 	}
 
-	ctx = callResponsePrepared(ctx, s.hooks)
+	ctx = s.CallResponsePrepared(ctx)
 
 	respBytes, err := proto.Marshal(respContent)
 	if err != nil {
-		err = wrapErr(err, "failed to marshal proto response")
-		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		err = twirp.WrapErr(err, "failed to marshal proto response")
+		s.WriteError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
 
@@ -434,9 +445,9 @@ func (s *svc2Server) serveSamePackageProtoImportProtobuf(ctx context.Context, re
 	resp.Header().Set("Content-Type", "application/protobuf")
 	resp.WriteHeader(http.StatusOK)
 	if _, err = resp.Write(respBytes); err != nil {
-		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
+		s.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
-	callResponseSent(ctx, s.hooks)
+	s.CallResponseSent(ctx)
 }
 
 func (s *svc2Server) ServiceDescriptor() ([]byte, int) {

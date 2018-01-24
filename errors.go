@@ -126,10 +126,17 @@ func InternalErrorWith(err error) Error {
 	msg := err.Error()
 	twerr := NewError(Internal, msg)
 	twerr = twerr.WithMeta("cause", fmt.Sprintf("%T", err)) // to easily tell apart wrapped internal errors from explicit ones
-	return &wrappedErr{
-		wrapper: twerr,
-		cause:   err,
+	return &causedErr{
+		err:   twerr,
+		cause: err,
 	}
+}
+
+// BadRouteError is used when the twirp server cannot route a request
+func BadRouteError(msg string, method, url string) Error {
+	err := NewError(BadRoute, msg)
+	err = err.WithMeta("twirp_invalid_route", method+" "+url)
+	return err
 }
 
 // ErrorCode represents a Twirp error type.
@@ -317,25 +324,37 @@ func (e *twerr) Error() string {
 	return fmt.Sprintf("twirp error %s: %s", e.code, e.msg)
 }
 
-// wrappedErr fulfills the twirp.Error interface and the
-// github.com/pkg/errors.Causer interface. It exposes all the twirp error
-// methods, but root cause of an error can be retrieved with
-// (*wrappedErr).Cause. This is expected to be used with the InternalErrorWith
-// function.
-type wrappedErr struct {
-	wrapper Error
-	cause   error
+// err is an 'alias' interface to prevent the embedded field name from clashing
+// with the method name.
+type err interface {
+	Error
 }
 
-func (e *wrappedErr) Code() ErrorCode            { return e.wrapper.Code() }
-func (e *wrappedErr) Msg() string                { return e.wrapper.Msg() }
-func (e *wrappedErr) Meta(key string) string     { return e.wrapper.Meta(key) }
-func (e *wrappedErr) MetaMap() map[string]string { return e.wrapper.MetaMap() }
-func (e *wrappedErr) Error() string              { return e.wrapper.Error() }
-func (e *wrappedErr) WithMeta(key string, val string) Error {
-	return &wrappedErr{
-		wrapper: e.wrapper.WithMeta(key, val),
-		cause:   e.cause,
+// causedErr fulfills the twirp.Error interface and the
+// github.com/pkg/errors.Causer interface. It exposes all the twirp error
+// methods, but root cause of an error can be retrieved with
+// (*causedErr).Cause. This is expected to be used with the InternalErrorWith
+// function.
+type causedErr struct {
+	err
+	cause error
+}
+
+func (e *causedErr) WithMeta(key string, val string) Error {
+	return &causedErr{
+		err:   e.WithMeta(key, val),
+		cause: e.cause,
 	}
 }
-func (e *wrappedErr) Cause() error { return e.cause }
+func (e *causedErr) Cause() error { return e.cause }
+
+// wrappedError implements the github.com/pkg/errors.Causer interface, allowing errors to be
+// examined for their root cause.
+type wrappedError struct {
+	msg   string
+	cause error
+}
+
+func WrapErr(err error, msg string) error { return &wrappedError{msg: msg, cause: err} }
+func (e *wrappedError) Cause() error      { return e.cause }
+func (e *wrappedError) Error() string     { return e.msg + ": " + e.cause.Error() }

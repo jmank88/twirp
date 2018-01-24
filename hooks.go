@@ -13,7 +13,10 @@
 
 package twirp
 
-import "context"
+import (
+	"context"
+	"log"
+)
 
 // ServerHooks is a container for callbacks that can instrument a
 // Twirp-generated server. These callbacks all accept a context and return a
@@ -54,6 +57,9 @@ type ServerHooks struct {
 	// either by the service implementation or by Twirp itself.
 	// The Error is passed as argument to the hook.
 	Error func(context.Context, Error) context.Context
+
+	// Logger is used to emit warning messages.
+	Logger *log.Logger
 }
 
 // ChainHooks creates a new *ServerHooks which chains the callbacks in
@@ -117,5 +123,52 @@ func ChainHooks(hooks ...*ServerHooks) *ServerHooks {
 			}
 			return ctx
 		},
+	}
+}
+
+// Call ServerHooks.RequestReceived if the hook is available
+func (h *ServerHooks) CallRequestReceived(ctx context.Context) (context.Context, error) {
+	if h == nil || h.RequestReceived == nil {
+		return ctx, nil
+	}
+	return h.RequestReceived(ctx)
+}
+
+// Call ServerHooks.RequestRouted if the hook is available
+func (h *ServerHooks) CallRequestRouted(ctx context.Context) (context.Context, error) {
+	if h == nil || h.RequestRouted == nil {
+		return ctx, nil
+	}
+	return h.RequestRouted(ctx)
+}
+
+// Call ServerHooks.ResponsePrepared if the hook is available
+func (h *ServerHooks) CallResponsePrepared(ctx context.Context) context.Context {
+	if h == nil || h.ResponsePrepared == nil {
+		return ctx
+	}
+	return h.ResponsePrepared(ctx)
+}
+
+// Call ServerHooks.ResponseSent if the hook is available
+func (h *ServerHooks) CallResponseSent(ctx context.Context) {
+	if h == nil || h.ResponseSent == nil {
+		return
+	}
+	h.ResponseSent(ctx)
+}
+
+// Call ServerHooks.Error if the hook is available
+func (h *ServerHooks) CallError(ctx context.Context, err Error) context.Context {
+	if h == nil || h.Error == nil {
+		return ctx
+	}
+	return h.Error(ctx, err)
+}
+
+// Printf prints the formatted string to the log.Logger, if available.
+func (h *ServerHooks) Printf(format string, v ...interface{}) {
+	if h != nil && h.Logger != nil {
+		h.Logger.Printf(format, v)
 	}
 }
