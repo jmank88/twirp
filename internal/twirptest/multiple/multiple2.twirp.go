@@ -141,7 +141,7 @@ func (s *svc2Server) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	ctx = ctxsetters.WithResponseWriter(ctx, resp)
 
 	var err error
-	ctx, err = callRequestReceived(ctx, s.hooks)
+	ctx, err = s.hooks.CallRequestReceived(ctx)
 	if err != nil {
 		s.writeError(ctx, resp, err)
 		return
@@ -185,7 +185,7 @@ func (s *svc2Server) serveSend(ctx context.Context, resp http.ResponseWriter, re
 func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	var err error
 	ctx = ctxsetters.WithMethodName(ctx, "Send")
-	ctx, err = callRequestRouted(ctx, s.hooks)
+	ctx, err = s.hooks.CallRequestRouted(ctx)
 	if err != nil {
 		s.writeError(ctx, resp, err)
 		return
@@ -222,7 +222,7 @@ func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter
 		return
 	}
 
-	ctx = callResponsePrepared(ctx, s.hooks)
+	ctx = s.hooks.CallResponsePrepared(ctx)
 
 	var buf bytes.Buffer
 	marshaler := &jsonpb.Marshaler{OrigName: true}
@@ -238,13 +238,13 @@ func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter
 	if _, err = resp.Write(buf.Bytes()); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
-	callResponseSent(ctx, s.hooks)
+	s.hooks.CallResponseSent(ctx)
 }
 
 func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	var err error
 	ctx = ctxsetters.WithMethodName(ctx, "Send")
-	ctx, err = callRequestRouted(ctx, s.hooks)
+	ctx, err = s.hooks.CallRequestRouted(ctx)
 	if err != nil {
 		s.writeError(ctx, resp, err)
 		return
@@ -286,7 +286,7 @@ func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWr
 		return
 	}
 
-	ctx = callResponsePrepared(ctx, s.hooks)
+	ctx = s.hooks.CallResponsePrepared(ctx)
 
 	respBytes, err := proto.Marshal(respContent)
 	if err != nil {
@@ -301,7 +301,7 @@ func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWr
 	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
-	callResponseSent(ctx, s.hooks)
+	s.hooks.CallResponseSent(ctx)
 }
 
 func (s *svc2Server) serveSamePackageProtoImport(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
@@ -320,7 +320,7 @@ func (s *svc2Server) serveSamePackageProtoImport(ctx context.Context, resp http.
 func (s *svc2Server) serveSamePackageProtoImportJSON(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	var err error
 	ctx = ctxsetters.WithMethodName(ctx, "SamePackageProtoImport")
-	ctx, err = callRequestRouted(ctx, s.hooks)
+	ctx, err = s.hooks.CallRequestRouted(ctx)
 	if err != nil {
 		s.writeError(ctx, resp, err)
 		return
@@ -357,7 +357,7 @@ func (s *svc2Server) serveSamePackageProtoImportJSON(ctx context.Context, resp h
 		return
 	}
 
-	ctx = callResponsePrepared(ctx, s.hooks)
+	ctx = s.hooks.CallResponsePrepared(ctx)
 
 	var buf bytes.Buffer
 	marshaler := &jsonpb.Marshaler{OrigName: true}
@@ -373,13 +373,13 @@ func (s *svc2Server) serveSamePackageProtoImportJSON(ctx context.Context, resp h
 	if _, err = resp.Write(buf.Bytes()); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
-	callResponseSent(ctx, s.hooks)
+	s.hooks.CallResponseSent(ctx)
 }
 
 func (s *svc2Server) serveSamePackageProtoImportProtobuf(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	var err error
 	ctx = ctxsetters.WithMethodName(ctx, "SamePackageProtoImport")
-	ctx, err = callRequestRouted(ctx, s.hooks)
+	ctx, err = s.hooks.CallRequestRouted(ctx)
 	if err != nil {
 		s.writeError(ctx, resp, err)
 		return
@@ -421,7 +421,7 @@ func (s *svc2Server) serveSamePackageProtoImportProtobuf(ctx context.Context, re
 		return
 	}
 
-	ctx = callResponsePrepared(ctx, s.hooks)
+	ctx = s.hooks.CallResponsePrepared(ctx)
 
 	respBytes, err := proto.Marshal(respContent)
 	if err != nil {
@@ -436,7 +436,7 @@ func (s *svc2Server) serveSamePackageProtoImportProtobuf(ctx context.Context, re
 	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
-	callResponseSent(ctx, s.hooks)
+	s.hooks.CallResponseSent(ctx)
 }
 
 func (s *svc2Server) ServiceDescriptor() ([]byte, int) {

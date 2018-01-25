@@ -143,7 +143,7 @@ func (s *svc2Server) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	ctx = ctxsetters.WithResponseWriter(ctx, resp)
 
 	var err error
-	ctx, err = callRequestReceived(ctx, s.hooks)
+	ctx, err = s.hooks.CallRequestReceived(ctx)
 	if err != nil {
 		s.writeError(ctx, resp, err)
 		return
@@ -184,7 +184,7 @@ func (s *svc2Server) serveSend(ctx context.Context, resp http.ResponseWriter, re
 func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	var err error
 	ctx = ctxsetters.WithMethodName(ctx, "Send")
-	ctx, err = callRequestRouted(ctx, s.hooks)
+	ctx, err = s.hooks.CallRequestRouted(ctx)
 	if err != nil {
 		s.writeError(ctx, resp, err)
 		return
@@ -221,7 +221,7 @@ func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter
 		return
 	}
 
-	ctx = callResponsePrepared(ctx, s.hooks)
+	ctx = s.hooks.CallResponsePrepared(ctx)
 
 	var buf bytes.Buffer
 	marshaler := &jsonpb.Marshaler{OrigName: true}
@@ -237,13 +237,13 @@ func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter
 	if _, err = resp.Write(buf.Bytes()); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
-	callResponseSent(ctx, s.hooks)
+	s.hooks.CallResponseSent(ctx)
 }
 
 func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	var err error
 	ctx = ctxsetters.WithMethodName(ctx, "Send")
-	ctx, err = callRequestRouted(ctx, s.hooks)
+	ctx, err = s.hooks.CallRequestRouted(ctx)
 	if err != nil {
 		s.writeError(ctx, resp, err)
 		return
@@ -285,7 +285,7 @@ func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWr
 		return
 	}
 
-	ctx = callResponsePrepared(ctx, s.hooks)
+	ctx = s.hooks.CallResponsePrepared(ctx)
 
 	respBytes, err := proto.Marshal(respContent)
 	if err != nil {
@@ -300,7 +300,7 @@ func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWr
 	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
-	callResponseSent(ctx, s.hooks)
+	s.hooks.CallResponseSent(ctx)
 }
 
 func (s *svc2Server) ServiceDescriptor() ([]byte, int) {
@@ -363,7 +363,7 @@ func writeError(ctx context.Context, resp http.ResponseWriter, err error, hooks 
 
 	statusCode := twirp.ServerHTTPStatusFromErrorCode(twerr.Code())
 	ctx = ctxsetters.WithStatusCode(ctx, statusCode)
-	ctx = callError(ctx, hooks, twerr)
+	ctx = hooks.CallError(ctx, twerr)
 
 	resp.Header().Set("Content-Type", "application/json") // Error responses are always JSON (instead of protobuf)
 	resp.WriteHeader(statusCode)                          // HTTP response status code
@@ -374,7 +374,7 @@ func writeError(ctx context.Context, resp http.ResponseWriter, err error, hooks 
 		log.Printf("unable to send error message %q: %s", twerr, err2)
 	}
 
-	callResponseSent(ctx, hooks)
+	hooks.CallResponseSent(ctx)
 }
 
 // urlBase helps ensure that addr specifies a scheme. If it is unparsable
@@ -671,46 +671,6 @@ func doJSONRequest(ctx context.Context, client HTTPClient, url string, in, out p
 		return clientError("aborted because context was done", err)
 	}
 	return nil
-}
-
-// Call twirp.ServerHooks.RequestReceived if the hook is available
-func callRequestReceived(ctx context.Context, h *twirp.ServerHooks) (context.Context, error) {
-	if h == nil || h.RequestReceived == nil {
-		return ctx, nil
-	}
-	return h.RequestReceived(ctx)
-}
-
-// Call twirp.ServerHooks.RequestRouted if the hook is available
-func callRequestRouted(ctx context.Context, h *twirp.ServerHooks) (context.Context, error) {
-	if h == nil || h.RequestRouted == nil {
-		return ctx, nil
-	}
-	return h.RequestRouted(ctx)
-}
-
-// Call twirp.ServerHooks.ResponsePrepared if the hook is available
-func callResponsePrepared(ctx context.Context, h *twirp.ServerHooks) context.Context {
-	if h == nil || h.ResponsePrepared == nil {
-		return ctx
-	}
-	return h.ResponsePrepared(ctx)
-}
-
-// Call twirp.ServerHooks.ResponseSent if the hook is available
-func callResponseSent(ctx context.Context, h *twirp.ServerHooks) {
-	if h == nil || h.ResponseSent == nil {
-		return
-	}
-	h.ResponseSent(ctx)
-}
-
-// Call twirp.ServerHooks.Error if the hook is available
-func callError(ctx context.Context, h *twirp.ServerHooks, err twirp.Error) context.Context {
-	if h == nil || h.Error == nil {
-		return ctx
-	}
-	return h.Error(ctx, err)
 }
 
 var twirpFileDescriptor0 = []byte{

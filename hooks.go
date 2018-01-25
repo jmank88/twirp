@@ -119,3 +119,43 @@ func ChainHooks(hooks ...*ServerHooks) *ServerHooks {
 		},
 	}
 }
+
+// CallRequestReceived calls RequestReceived if available.
+func (h *ServerHooks) CallRequestReceived(ctx context.Context) (context.Context, error) {
+	if h == nil || h.RequestReceived == nil {
+		return ctx, nil
+	}
+	return h.RequestReceived(ctx)
+}
+
+// CallRequestRouted calls RequestRouted if available.
+func (h *ServerHooks) CallRequestRouted(ctx context.Context) (context.Context, error) {
+	if h == nil || h.RequestRouted == nil {
+		return ctx, nil
+	}
+	return h.RequestRouted(ctx)
+}
+
+// CallResponsePrepared calls ResponsePrepared if available.
+func (h *ServerHooks) CallResponsePrepared(ctx context.Context) context.Context {
+	if h == nil || h.ResponsePrepared == nil {
+		return ctx
+	}
+	return h.ResponsePrepared(ctx)
+}
+
+// CallResponseSent calls ResponseSent if available.
+func (h *ServerHooks) CallResponseSent(ctx context.Context) {
+	if h == nil || h.ResponseSent == nil {
+		return
+	}
+	h.ResponseSent(ctx)
+}
+
+// CallError calls Error if available.
+func (h *ServerHooks) CallError(ctx context.Context, err Error) context.Context {
+	if h == nil || h.Error == nil {
+		return ctx
+	}
+	return h.Error(ctx, err)
+}
