@@ -21,6 +21,7 @@ import jsonpb "github.com/golang/protobuf/jsonpb"
 import proto "github.com/golang/protobuf/proto"
 import twirp "github.com/twitchtv/twirp"
 import ctxsetters "github.com/twitchtv/twirp/ctxsetters"
+import ubjson "github.com/jmank88/ubjson"
 
 // Imports only used by utility functions:
 import io "io"
@@ -104,6 +105,40 @@ func (c *svcJSONClient) Send(ctx context.Context, in *Msg) (*Msg, error) {
 	return out, err
 }
 
+// =================
+// Svc UBJSON Client
+// =================
+
+type svcUBJSONClient struct {
+	client HTTPClient
+	urls   [1]string
+}
+
+// NewSvcUBJSONClient creates a UBJSON client that implements the Svc interface.
+// It communicates using UBJSON and can be configured with a custom HTTPClient.
+func NewSvcUBJSONClient(addr string, client HTTPClient) Svc {
+	prefix := urlBase(addr) + SvcPathPrefix
+	urls := [1]string{
+		prefix + "Send",
+	}
+	if httpClient, ok := client.(*http.Client); ok {
+		return &svcUBJSONClient{
+			client: withoutRedirects(httpClient),
+			urls:   urls,
+		}
+	}
+	return &svcUBJSONClient{
+		client: client,
+		urls:   urls,
+	}
+}
+
+func (c *svcUBJSONClient) Send(ctx context.Context, in *Msg) (*Msg, error) {
+	out := new(Msg)
+	err := doUBJSONRequest(ctx, c.client, c.urls[0], in, out)
+	return out, err
+}
+
 // ==================
 // Svc Server Handler
 // ==================
@@ -169,6 +204,8 @@ func (s *svcServer) serveSend(ctx context.Context, resp http.ResponseWriter, req
 		s.serveSendJSON(ctx, resp, req)
 	case "application/protobuf":
 		s.serveSendProtobuf(ctx, resp, req)
+	case "application/ubjson":
+		s.serveSendUBJSON(ctx, resp, req)
 	default:
 		msg := fmt.Sprintf("unexpected Content-Type: %q", req.Header.Get("Content-Type"))
 		twerr := badRouteError(msg, req.Method, req.URL.Path)
@@ -225,11 +262,12 @@ func (s *svcServer) serveSendJSON(ctx context.Context, resp http.ResponseWriter,
 		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
+	respBytes := buf.Bytes()
 
 	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(http.StatusOK)
-	if _, err = resp.Write(buf.Bytes()); err != nil {
+	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
 	callResponseSent(ctx, s.hooks)
@@ -291,6 +329,64 @@ func (s *svcServer) serveSendProtobuf(ctx context.Context, resp http.ResponseWri
 
 	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
 	resp.Header().Set("Content-Type", "application/protobuf")
+	resp.WriteHeader(http.StatusOK)
+	if _, err = resp.Write(respBytes); err != nil {
+		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
+	}
+	callResponseSent(ctx, s.hooks)
+}
+
+func (s *svcServer) serveSendUBJSON(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
+	var err error
+	ctx = ctxsetters.WithMethodName(ctx, "Send")
+	ctx, err = callRequestRouted(ctx, s.hooks)
+	if err != nil {
+		s.writeError(ctx, resp, err)
+		return
+	}
+
+	defer closebody(req.Body)
+	reqContent := new(Msg)
+	decoder := ubjson.NewDecoder(req.Body)
+	if err = decoder.Decode(reqContent); err != nil {
+		err = wrapErr(err, "failed to parse request ubjson")
+		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		return
+	}
+
+	// Call service method
+	var respContent *Msg
+	func() {
+		defer func() {
+			// In case of a panic, serve a 500 error and then panic.
+			if r := recover(); r != nil {
+				s.writeError(ctx, resp, twirp.InternalError("Internal service panic"))
+				panic(r)
+			}
+		}()
+		respContent, err = s.Send(ctx, reqContent)
+	}()
+
+	if err != nil {
+		s.writeError(ctx, resp, err)
+		return
+	}
+	if respContent == nil {
+		s.writeError(ctx, resp, twirp.InternalError("received a nil *Msg and nil error while calling Send. nil responses are not supported"))
+		return
+	}
+
+	ctx = callResponsePrepared(ctx, s.hooks)
+
+	respBytes, err := ubjson.Marshal(respContent)
+	if err != nil {
+		err = wrapErr(err, "failed to marshal ubjson response")
+		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		return
+	}
+
+	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
+	resp.Header().Set("Content-Type", "application/ubjson")
 	resp.WriteHeader(http.StatusOK)
 	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
@@ -622,7 +718,6 @@ func doProtobufRequest(ctx context.Context, client HTTPClient, url string, in, o
 	if err = ctx.Err(); err != nil {
 		return clientError("aborted because context was done", err)
 	}
-
 	if err = proto.Unmarshal(respBodyBytes, out); err != nil {
 		return clientError("failed to unmarshal proto response", err)
 	}
@@ -661,6 +756,45 @@ func doJSONRequest(ctx context.Context, client HTTPClient, url string, in, out p
 	unmarshaler := jsonpb.Unmarshaler{AllowUnknownFields: true}
 	if err = unmarshaler.Unmarshal(resp.Body, out); err != nil {
 		return clientError("failed to unmarshal json response", err)
+	}
+	if err = ctx.Err(); err != nil {
+		return clientError("aborted because context was done", err)
+	}
+	return nil
+}
+
+// doUBJSONRequest is common code to make a request to the remote twirp service.
+func doUBJSONRequest(ctx context.Context, client HTTPClient, url string, in, out proto.Message) error {
+	var err error
+	reqBody := bytes.NewBuffer(nil)
+	encoder := ubjson.NewEncoder(reqBody)
+	if err = encoder.Encode(in); err != nil {
+		return clientError("failed to marshal json request", err)
+	}
+	if err = ctx.Err(); err != nil {
+		return clientError("aborted because context was done", err)
+	}
+
+	req, err := newRequest(ctx, url, reqBody, "application/ubjson")
+	if err != nil {
+		return clientError("could not build request", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return clientError("failed to do request", err)
+	}
+	defer closebody(resp.Body)
+	if err = ctx.Err(); err != nil {
+		return clientError("aborted because context was done", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return errorFromResponse(resp)
+	}
+
+	decoder := ubjson.NewDecoder(resp.Body)
+	if err = decoder.Decode(out); err != nil {
+		return clientError("failed to unmarshal ubjson response", err)
 	}
 	if err = ctx.Err(); err != nil {
 		return clientError("aborted because context was done", err)

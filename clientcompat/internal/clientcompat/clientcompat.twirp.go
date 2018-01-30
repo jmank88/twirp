@@ -21,6 +21,7 @@ import jsonpb "github.com/golang/protobuf/jsonpb"
 import proto "github.com/golang/protobuf/proto"
 import twirp "github.com/twitchtv/twirp"
 import ctxsetters "github.com/twitchtv/twirp/ctxsetters"
+import ubjson "github.com/jmank88/ubjson"
 
 // Imports only used by utility functions:
 import io "io"
@@ -120,6 +121,47 @@ func (c *compatServiceJSONClient) NoopMethod(ctx context.Context, in *Empty) (*E
 	return out, err
 }
 
+// ===========================
+// CompatService UBJSON Client
+// ===========================
+
+type compatServiceUBJSONClient struct {
+	client HTTPClient
+	urls   [2]string
+}
+
+// NewCompatServiceUBJSONClient creates a UBJSON client that implements the CompatService interface.
+// It communicates using UBJSON and can be configured with a custom HTTPClient.
+func NewCompatServiceUBJSONClient(addr string, client HTTPClient) CompatService {
+	prefix := urlBase(addr) + CompatServicePathPrefix
+	urls := [2]string{
+		prefix + "Method",
+		prefix + "NoopMethod",
+	}
+	if httpClient, ok := client.(*http.Client); ok {
+		return &compatServiceUBJSONClient{
+			client: withoutRedirects(httpClient),
+			urls:   urls,
+		}
+	}
+	return &compatServiceUBJSONClient{
+		client: client,
+		urls:   urls,
+	}
+}
+
+func (c *compatServiceUBJSONClient) Method(ctx context.Context, in *Req) (*Resp, error) {
+	out := new(Resp)
+	err := doUBJSONRequest(ctx, c.client, c.urls[0], in, out)
+	return out, err
+}
+
+func (c *compatServiceUBJSONClient) NoopMethod(ctx context.Context, in *Empty) (*Empty, error) {
+	out := new(Empty)
+	err := doUBJSONRequest(ctx, c.client, c.urls[1], in, out)
+	return out, err
+}
+
 // ============================
 // CompatService Server Handler
 // ============================
@@ -188,6 +230,8 @@ func (s *compatServiceServer) serveMethod(ctx context.Context, resp http.Respons
 		s.serveMethodJSON(ctx, resp, req)
 	case "application/protobuf":
 		s.serveMethodProtobuf(ctx, resp, req)
+	case "application/ubjson":
+		s.serveMethodUBJSON(ctx, resp, req)
 	default:
 		msg := fmt.Sprintf("unexpected Content-Type: %q", req.Header.Get("Content-Type"))
 		twerr := badRouteError(msg, req.Method, req.URL.Path)
@@ -244,11 +288,12 @@ func (s *compatServiceServer) serveMethodJSON(ctx context.Context, resp http.Res
 		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
+	respBytes := buf.Bytes()
 
 	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(http.StatusOK)
-	if _, err = resp.Write(buf.Bytes()); err != nil {
+	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
 	callResponseSent(ctx, s.hooks)
@@ -317,12 +362,72 @@ func (s *compatServiceServer) serveMethodProtobuf(ctx context.Context, resp http
 	callResponseSent(ctx, s.hooks)
 }
 
+func (s *compatServiceServer) serveMethodUBJSON(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
+	var err error
+	ctx = ctxsetters.WithMethodName(ctx, "Method")
+	ctx, err = callRequestRouted(ctx, s.hooks)
+	if err != nil {
+		s.writeError(ctx, resp, err)
+		return
+	}
+
+	defer closebody(req.Body)
+	reqContent := new(Req)
+	decoder := ubjson.NewDecoder(req.Body)
+	if err = decoder.Decode(reqContent); err != nil {
+		err = wrapErr(err, "failed to parse request ubjson")
+		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		return
+	}
+
+	// Call service method
+	var respContent *Resp
+	func() {
+		defer func() {
+			// In case of a panic, serve a 500 error and then panic.
+			if r := recover(); r != nil {
+				s.writeError(ctx, resp, twirp.InternalError("Internal service panic"))
+				panic(r)
+			}
+		}()
+		respContent, err = s.Method(ctx, reqContent)
+	}()
+
+	if err != nil {
+		s.writeError(ctx, resp, err)
+		return
+	}
+	if respContent == nil {
+		s.writeError(ctx, resp, twirp.InternalError("received a nil *Resp and nil error while calling Method. nil responses are not supported"))
+		return
+	}
+
+	ctx = callResponsePrepared(ctx, s.hooks)
+
+	respBytes, err := ubjson.Marshal(respContent)
+	if err != nil {
+		err = wrapErr(err, "failed to marshal ubjson response")
+		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		return
+	}
+
+	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
+	resp.Header().Set("Content-Type", "application/ubjson")
+	resp.WriteHeader(http.StatusOK)
+	if _, err = resp.Write(respBytes); err != nil {
+		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
+	}
+	callResponseSent(ctx, s.hooks)
+}
+
 func (s *compatServiceServer) serveNoopMethod(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	switch req.Header.Get("Content-Type") {
 	case "application/json":
 		s.serveNoopMethodJSON(ctx, resp, req)
 	case "application/protobuf":
 		s.serveNoopMethodProtobuf(ctx, resp, req)
+	case "application/ubjson":
+		s.serveNoopMethodUBJSON(ctx, resp, req)
 	default:
 		msg := fmt.Sprintf("unexpected Content-Type: %q", req.Header.Get("Content-Type"))
 		twerr := badRouteError(msg, req.Method, req.URL.Path)
@@ -379,11 +484,12 @@ func (s *compatServiceServer) serveNoopMethodJSON(ctx context.Context, resp http
 		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
+	respBytes := buf.Bytes()
 
 	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(http.StatusOK)
-	if _, err = resp.Write(buf.Bytes()); err != nil {
+	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
 	callResponseSent(ctx, s.hooks)
@@ -445,6 +551,64 @@ func (s *compatServiceServer) serveNoopMethodProtobuf(ctx context.Context, resp 
 
 	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
 	resp.Header().Set("Content-Type", "application/protobuf")
+	resp.WriteHeader(http.StatusOK)
+	if _, err = resp.Write(respBytes); err != nil {
+		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
+	}
+	callResponseSent(ctx, s.hooks)
+}
+
+func (s *compatServiceServer) serveNoopMethodUBJSON(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
+	var err error
+	ctx = ctxsetters.WithMethodName(ctx, "NoopMethod")
+	ctx, err = callRequestRouted(ctx, s.hooks)
+	if err != nil {
+		s.writeError(ctx, resp, err)
+		return
+	}
+
+	defer closebody(req.Body)
+	reqContent := new(Empty)
+	decoder := ubjson.NewDecoder(req.Body)
+	if err = decoder.Decode(reqContent); err != nil {
+		err = wrapErr(err, "failed to parse request ubjson")
+		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		return
+	}
+
+	// Call service method
+	var respContent *Empty
+	func() {
+		defer func() {
+			// In case of a panic, serve a 500 error and then panic.
+			if r := recover(); r != nil {
+				s.writeError(ctx, resp, twirp.InternalError("Internal service panic"))
+				panic(r)
+			}
+		}()
+		respContent, err = s.NoopMethod(ctx, reqContent)
+	}()
+
+	if err != nil {
+		s.writeError(ctx, resp, err)
+		return
+	}
+	if respContent == nil {
+		s.writeError(ctx, resp, twirp.InternalError("received a nil *Empty and nil error while calling NoopMethod. nil responses are not supported"))
+		return
+	}
+
+	ctx = callResponsePrepared(ctx, s.hooks)
+
+	respBytes, err := ubjson.Marshal(respContent)
+	if err != nil {
+		err = wrapErr(err, "failed to marshal ubjson response")
+		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		return
+	}
+
+	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
+	resp.Header().Set("Content-Type", "application/ubjson")
 	resp.WriteHeader(http.StatusOK)
 	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
@@ -776,7 +940,6 @@ func doProtobufRequest(ctx context.Context, client HTTPClient, url string, in, o
 	if err = ctx.Err(); err != nil {
 		return clientError("aborted because context was done", err)
 	}
-
 	if err = proto.Unmarshal(respBodyBytes, out); err != nil {
 		return clientError("failed to unmarshal proto response", err)
 	}
@@ -815,6 +978,45 @@ func doJSONRequest(ctx context.Context, client HTTPClient, url string, in, out p
 	unmarshaler := jsonpb.Unmarshaler{AllowUnknownFields: true}
 	if err = unmarshaler.Unmarshal(resp.Body, out); err != nil {
 		return clientError("failed to unmarshal json response", err)
+	}
+	if err = ctx.Err(); err != nil {
+		return clientError("aborted because context was done", err)
+	}
+	return nil
+}
+
+// doUBJSONRequest is common code to make a request to the remote twirp service.
+func doUBJSONRequest(ctx context.Context, client HTTPClient, url string, in, out proto.Message) error {
+	var err error
+	reqBody := bytes.NewBuffer(nil)
+	encoder := ubjson.NewEncoder(reqBody)
+	if err = encoder.Encode(in); err != nil {
+		return clientError("failed to marshal json request", err)
+	}
+	if err = ctx.Err(); err != nil {
+		return clientError("aborted because context was done", err)
+	}
+
+	req, err := newRequest(ctx, url, reqBody, "application/ubjson")
+	if err != nil {
+		return clientError("could not build request", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return clientError("failed to do request", err)
+	}
+	defer closebody(resp.Body)
+	if err = ctx.Err(); err != nil {
+		return clientError("aborted because context was done", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return errorFromResponse(resp)
+	}
+
+	decoder := ubjson.NewDecoder(resp.Body)
+	if err = decoder.Decode(out); err != nil {
+		return clientError("failed to unmarshal ubjson response", err)
 	}
 	if err = ctx.Err(); err != nil {
 		return clientError("aborted because context was done", err)

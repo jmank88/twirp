@@ -14,6 +14,7 @@ import jsonpb "github.com/golang/protobuf/jsonpb"
 import proto "github.com/golang/protobuf/proto"
 import twirp "github.com/twitchtv/twirp"
 import ctxsetters "github.com/twitchtv/twirp/ctxsetters"
+import ubjson "github.com/jmank88/ubjson"
 
 // ==============
 // Svc2 Interface
@@ -107,6 +108,47 @@ func (c *svc2JSONClient) SamePackageProtoImport(ctx context.Context, in *Msg1) (
 	return out, err
 }
 
+// ==================
+// Svc2 UBJSON Client
+// ==================
+
+type svc2UBJSONClient struct {
+	client HTTPClient
+	urls   [2]string
+}
+
+// NewSvc2UBJSONClient creates a UBJSON client that implements the Svc2 interface.
+// It communicates using UBJSON and can be configured with a custom HTTPClient.
+func NewSvc2UBJSONClient(addr string, client HTTPClient) Svc2 {
+	prefix := urlBase(addr) + Svc2PathPrefix
+	urls := [2]string{
+		prefix + "Send",
+		prefix + "SamePackageProtoImport",
+	}
+	if httpClient, ok := client.(*http.Client); ok {
+		return &svc2UBJSONClient{
+			client: withoutRedirects(httpClient),
+			urls:   urls,
+		}
+	}
+	return &svc2UBJSONClient{
+		client: client,
+		urls:   urls,
+	}
+}
+
+func (c *svc2UBJSONClient) Send(ctx context.Context, in *Msg2) (*Msg2, error) {
+	out := new(Msg2)
+	err := doUBJSONRequest(ctx, c.client, c.urls[0], in, out)
+	return out, err
+}
+
+func (c *svc2UBJSONClient) SamePackageProtoImport(ctx context.Context, in *Msg1) (*Msg1, error) {
+	out := new(Msg1)
+	err := doUBJSONRequest(ctx, c.client, c.urls[1], in, out)
+	return out, err
+}
+
 // ===================
 // Svc2 Server Handler
 // ===================
@@ -175,6 +217,8 @@ func (s *svc2Server) serveSend(ctx context.Context, resp http.ResponseWriter, re
 		s.serveSendJSON(ctx, resp, req)
 	case "application/protobuf":
 		s.serveSendProtobuf(ctx, resp, req)
+	case "application/ubjson":
+		s.serveSendUBJSON(ctx, resp, req)
 	default:
 		msg := fmt.Sprintf("unexpected Content-Type: %q", req.Header.Get("Content-Type"))
 		twerr := badRouteError(msg, req.Method, req.URL.Path)
@@ -231,11 +275,12 @@ func (s *svc2Server) serveSendJSON(ctx context.Context, resp http.ResponseWriter
 		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
+	respBytes := buf.Bytes()
 
 	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(http.StatusOK)
-	if _, err = resp.Write(buf.Bytes()); err != nil {
+	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
 	callResponseSent(ctx, s.hooks)
@@ -304,12 +349,72 @@ func (s *svc2Server) serveSendProtobuf(ctx context.Context, resp http.ResponseWr
 	callResponseSent(ctx, s.hooks)
 }
 
+func (s *svc2Server) serveSendUBJSON(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
+	var err error
+	ctx = ctxsetters.WithMethodName(ctx, "Send")
+	ctx, err = callRequestRouted(ctx, s.hooks)
+	if err != nil {
+		s.writeError(ctx, resp, err)
+		return
+	}
+
+	defer closebody(req.Body)
+	reqContent := new(Msg2)
+	decoder := ubjson.NewDecoder(req.Body)
+	if err = decoder.Decode(reqContent); err != nil {
+		err = wrapErr(err, "failed to parse request ubjson")
+		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		return
+	}
+
+	// Call service method
+	var respContent *Msg2
+	func() {
+		defer func() {
+			// In case of a panic, serve a 500 error and then panic.
+			if r := recover(); r != nil {
+				s.writeError(ctx, resp, twirp.InternalError("Internal service panic"))
+				panic(r)
+			}
+		}()
+		respContent, err = s.Send(ctx, reqContent)
+	}()
+
+	if err != nil {
+		s.writeError(ctx, resp, err)
+		return
+	}
+	if respContent == nil {
+		s.writeError(ctx, resp, twirp.InternalError("received a nil *Msg2 and nil error while calling Send. nil responses are not supported"))
+		return
+	}
+
+	ctx = callResponsePrepared(ctx, s.hooks)
+
+	respBytes, err := ubjson.Marshal(respContent)
+	if err != nil {
+		err = wrapErr(err, "failed to marshal ubjson response")
+		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		return
+	}
+
+	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
+	resp.Header().Set("Content-Type", "application/ubjson")
+	resp.WriteHeader(http.StatusOK)
+	if _, err = resp.Write(respBytes); err != nil {
+		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
+	}
+	callResponseSent(ctx, s.hooks)
+}
+
 func (s *svc2Server) serveSamePackageProtoImport(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
 	switch req.Header.Get("Content-Type") {
 	case "application/json":
 		s.serveSamePackageProtoImportJSON(ctx, resp, req)
 	case "application/protobuf":
 		s.serveSamePackageProtoImportProtobuf(ctx, resp, req)
+	case "application/ubjson":
+		s.serveSamePackageProtoImportUBJSON(ctx, resp, req)
 	default:
 		msg := fmt.Sprintf("unexpected Content-Type: %q", req.Header.Get("Content-Type"))
 		twerr := badRouteError(msg, req.Method, req.URL.Path)
@@ -366,11 +471,12 @@ func (s *svc2Server) serveSamePackageProtoImportJSON(ctx context.Context, resp h
 		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
 		return
 	}
+	respBytes := buf.Bytes()
 
 	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(http.StatusOK)
-	if _, err = resp.Write(buf.Bytes()); err != nil {
+	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
 	}
 	callResponseSent(ctx, s.hooks)
@@ -432,6 +538,64 @@ func (s *svc2Server) serveSamePackageProtoImportProtobuf(ctx context.Context, re
 
 	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
 	resp.Header().Set("Content-Type", "application/protobuf")
+	resp.WriteHeader(http.StatusOK)
+	if _, err = resp.Write(respBytes); err != nil {
+		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
+	}
+	callResponseSent(ctx, s.hooks)
+}
+
+func (s *svc2Server) serveSamePackageProtoImportUBJSON(ctx context.Context, resp http.ResponseWriter, req *http.Request) {
+	var err error
+	ctx = ctxsetters.WithMethodName(ctx, "SamePackageProtoImport")
+	ctx, err = callRequestRouted(ctx, s.hooks)
+	if err != nil {
+		s.writeError(ctx, resp, err)
+		return
+	}
+
+	defer closebody(req.Body)
+	reqContent := new(Msg1)
+	decoder := ubjson.NewDecoder(req.Body)
+	if err = decoder.Decode(reqContent); err != nil {
+		err = wrapErr(err, "failed to parse request ubjson")
+		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		return
+	}
+
+	// Call service method
+	var respContent *Msg1
+	func() {
+		defer func() {
+			// In case of a panic, serve a 500 error and then panic.
+			if r := recover(); r != nil {
+				s.writeError(ctx, resp, twirp.InternalError("Internal service panic"))
+				panic(r)
+			}
+		}()
+		respContent, err = s.SamePackageProtoImport(ctx, reqContent)
+	}()
+
+	if err != nil {
+		s.writeError(ctx, resp, err)
+		return
+	}
+	if respContent == nil {
+		s.writeError(ctx, resp, twirp.InternalError("received a nil *Msg1 and nil error while calling SamePackageProtoImport. nil responses are not supported"))
+		return
+	}
+
+	ctx = callResponsePrepared(ctx, s.hooks)
+
+	respBytes, err := ubjson.Marshal(respContent)
+	if err != nil {
+		err = wrapErr(err, "failed to marshal ubjson response")
+		s.writeError(ctx, resp, twirp.InternalErrorWith(err))
+		return
+	}
+
+	ctx = ctxsetters.WithStatusCode(ctx, http.StatusOK)
+	resp.Header().Set("Content-Type", "application/ubjson")
 	resp.WriteHeader(http.StatusOK)
 	if _, err = resp.Write(respBytes); err != nil {
 		log.Printf("errored while writing response to client, but already sent response status code to 200: %s", err)
